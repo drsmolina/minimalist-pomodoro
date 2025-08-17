@@ -1,278 +1,360 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Minimalist Pomodoro</title>
-    <meta name="description" content="A minimalist Pomodoro timer with focus/short/long sessions." />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='black'/><text x='50' y='58' font-size='48' text-anchor='middle' fill='white'>⏱️</text></svg>" />
-    <!-- Tailwind (CDN) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body class="min-h-screen bg-neutral-950 text-neutral-100">
-    <div id="root"></div>
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-    <!-- React + ReactDOM (UMD) -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- Babel (so we can ship a single file with JSX; OK for GitHub Pages) -->
-    <script src="https://unpkg.com/babel-standalone@7/babel.min.js"></script>
+// Minimalist Pomodoro Timer — single-file React component
+// Tailwind is assumed available in the Canvas preview.
+// Features: Focus/Short/Long sessions, auto-advance, cycle tracking, keyboard shortcuts,
+// localStorage persistence, progress ring, sound + (optional) desktop notifications.
 
-    <script type="text/babel">
-      const { useEffect, useMemo, useRef, useState } = React;
+// ---------- Helpers ----------
+function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
 
-      // Helpers
-      const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
-      const pad = (n) => n.toString().padStart(2, "0");
+function pad(n) { return n.toString().padStart(2, "0"); }
 
-      const useLocalStorage = (key, initial) => {
-        const [value, setValue] = useState(() => {
-          try {
-            const raw = localStorage.getItem(key);
-            return raw != null ? JSON.parse(raw) : (typeof initial === "function" ? initial() : initial);
-          } catch {
-            return typeof initial === "function" ? initial() : initial;
-          }
-        });
-        useEffect(() => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }, [key, value]);
-        return [value, setValue];
-      };
+function useLocalStorage(key, initial) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw != null ? JSON.parse(raw) : (typeof initial === "function" ? initial() : initial);
+    } catch {
+      return typeof initial === "function" ? initial() : initial;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }, [key, value]);
+  return [value, setValue];
+}
 
-      const useTick = (isRunning, targetTs, onElapsed) => {
-        useEffect(() => {
-          if (!isRunning) return;
-          let raf; let last;
-          const loop = (t) => {
-            if (last === undefined) last = t;
-            raf = requestAnimationFrame(loop);
-            if (Date.now() >= targetTs) {
-              cancelAnimationFrame(raf);
-              onElapsed();
-            }
-          };
-          raf = requestAnimationFrame(loop);
-          return () => { if (raf) cancelAnimationFrame(raf); };
-        }, [isRunning, targetTs, onElapsed]);
-      };
+function useTick(isRunning, targetTs, onElapsed) {
+  useEffect(() => {
+    if (!isRunning) return;
+    let raf; let last;
+    const loop = (t) => {
+      if (last === undefined) last = t;
+      raf = requestAnimationFrame(loop);
+      if (Date.now() >= targetTs) {
+        cancelAnimationFrame(raf);
+        onElapsed();
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { if (raf) cancelAnimationFrame(raf); };
+  }, [isRunning, targetTs, onElapsed]);
+}
 
-      const beep = () => {
-        try {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const o = ctx.createOscillator();
-          const g = ctx.createGain();
-          o.type = "sine"; o.frequency.setValueAtTime(880, ctx.currentTime);
-          g.gain.setValueAtTime(0.0001, ctx.currentTime);
-          g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.02);
-          g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
-          o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.35);
-        } catch {}
-      };
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = "sine"; o.frequency.setValueAtTime(880, ctx.currentTime);
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.3);
+    o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.35);
+  } catch {}
+}
 
-      function PomodoroApp() {
-        // Settings (minutes)
-        const [focusMin, setFocusMin] = useLocalStorage("pm_focusMin", 25);
-        const [shortMin, setShortMin] = useLocalStorage("pm_shortMin", 5);
-        const [longMin, setLongMin] = useLocalStorage("pm_longMin", 15);
-        const [roundsForLong, setRoundsForLong] = useLocalStorage("pm_roundsForLong", 4);
-        const [autoStart, setAutoStart] = useLocalStorage("pm_autoStart", true);
+// ---------- Component ----------
+export default function Pomodoro() {
+  // Settings (minutes)
+  const [focusMin, setFocusMin] = useLocalStorage("pm_focusMin", 25);
+  const [shortMin, setShortMin] = useLocalStorage("pm_shortMin", 5);
+  const [longMin, setLongMin] = useLocalStorage("pm_longMin", 15);
+  const [roundsForLong, setRoundsForLong] = useLocalStorage("pm_roundsForLong", 4);
+  const [autoStart, setAutoStart] = useLocalStorage("pm_autoStart", true);
 
-        // State
-        const [mode, setMode] = useLocalStorage("pm_mode", "focus"); // 'focus' | 'short' | 'long'
-        const [isRunning, setIsRunning] = useLocalStorage("pm_running", false);
-        const [targetTs, setTargetTs] = useLocalStorage("pm_targetTs", null);
-        const [secondsLeft, setSecondsLeft] = useLocalStorage("pm_secondsLeft", focusMin * 60);
-        const [completedFocus, setCompletedFocus] = useLocalStorage("pm_completedFocus", 0);
-        const [showSettings, setShowSettings] = useLocalStorage("pm_showSettings", false);
+  // State
+  const [mode, setMode] = useLocalStorage("pm_mode", "focus"); // 'focus' | 'short' | 'long'
+  const [isRunning, setIsRunning] = useLocalStorage("pm_running", false);
+  const [targetTs, setTargetTs] = useLocalStorage("pm_targetTs", null);
+  const [secondsLeft, setSecondsLeft] = useLocalStorage("pm_secondsLeft", focusMin * 60);
+  const [completedFocus, setCompletedFocus] = useLocalStorage("pm_completedFocus", 0);
+  const [showSettings, setShowSettings] = useLocalStorage("pm_showSettings", false);
 
-        const totalSeconds = useMemo(() => (
-          (mode === "focus" ? focusMin : mode === "short" ? shortMin : longMin) * 60
-        ), [mode, focusMin, shortMin, longMin]);
+  // Derive total seconds by mode
+  const totalSeconds = useMemo(() => {
+    return (mode === "focus" ? focusMin : mode === "short" ? shortMin : longMin) * 60;
+  }, [mode, focusMin, shortMin, longMin]);
 
-        useEffect(() => { setSecondsLeft((s) => clamp(s, 0, totalSeconds)); }, [totalSeconds]);
+  // Keep secondsLeft consistent if settings or mode changed
+  useEffect(() => {
+    setSecondsLeft((s) => clamp(s, 0, totalSeconds));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalSeconds]);
 
-        useEffect(() => {
-          const m = Math.floor(secondsLeft / 60), s = secondsLeft % 60;
-          const label = mode === "focus" ? "Focus" : mode === "short" ? "Break" : "Long Break";
-          document.title = `${pad(m)}:${pad(s)} — ${label} • Pomodoro`;
-        }, [secondsLeft, mode]);
+  // Title update
+  useEffect(() => {
+    const m = Math.floor(secondsLeft / 60), s = secondsLeft % 60;
+    const prefix = `${pad(m)}:${pad(s)}`;
+    const label = mode === "focus" ? "Focus" : mode === "short" ? "Break" : "Long Break";
+    document.title = `${prefix} — ${label} • Pomodoro`;
+  }, [secondsLeft, mode]);
 
-        useTick(isRunning, targetTs, () => {
-          setSecondsLeft(0);
-          setIsRunning(false);
-          handleComplete();
-        });
+  // Timer tick based on targetTs
+  useTick(isRunning, targetTs, () => {
+    setSecondsLeft(0);
+    setIsRunning(false);
+    handleComplete();
+  });
 
-        useEffect(() => {
-          if (!isRunning || !targetTs) return;
-          const id = setInterval(() => {
-            const remain = Math.max(0, Math.round((targetTs - Date.now()) / 1000));
-            setSecondsLeft(remain);
-          }, 250);
-          return () => clearInterval(id);
-        }, [isRunning, targetTs]);
+  // Also update secondsLeft while running
+  useEffect(() => {
+    if (!isRunning || !targetTs) return;
+    const id = setInterval(() => {
+      const remain = Math.max(0, Math.round((targetTs - Date.now()) / 1000));
+      setSecondsLeft(remain);
+    }, 250);
+    return () => clearInterval(id);
+  }, [isRunning, targetTs]);
 
-        const start = () => {
-          const ts = Date.now() + secondsLeft * 1000;
-          setTargetTs(ts);
-          setIsRunning(true);
-        };
+  function start() {
+    const now = Date.now();
+    const ts = now + secondsLeft * 1000;
+    setTargetTs(ts);
+    setIsRunning(true);
+  }
 
-        const pause = () => {
-          setIsRunning(false);
-          if (targetTs) {
-            const remain = Math.max(0, Math.round((targetTs - Date.now()) / 1000));
-            setSecondsLeft(remain);
-          }
-        };
+  function pause() {
+    setIsRunning(false);
+    if (targetTs) {
+      const remain = Math.max(0, Math.round((targetTs - Date.now()) / 1000));
+      setSecondsLeft(remain);
+    }
+  }
 
-        const reset = (toMode = mode) => {
-          const secs = (toMode === "focus" ? focusMin : toMode === "short" ? shortMin : longMin) * 60;
-          setSecondsLeft(secs);
-          setIsRunning(false);
-          setTargetTs(null);
-        };
+  function reset(toMode = mode) {
+    const secs = (toMode === "focus" ? focusMin : toMode === "short" ? shortMin : longMin) * 60;
+    setSecondsLeft(secs);
+    setIsRunning(false);
+    setTargetTs(null);
+  }
 
-        const switchMode = (nextMode) => { setMode(nextMode); reset(nextMode); };
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    reset(nextMode);
+  }
 
-        const notify = async (msg) => {
-          try {
-            if ("Notification" in window) {
-              if (Notification.permission === "granted") new Notification(msg);
-              else if (Notification.permission !== "denied") {
-                const perm = await Notification.requestPermission();
-                if (perm === "granted") new Notification(msg);
+  async function notify(msg) {
+    try {
+      if ("Notification" in window) {
+        if (Notification.permission === "granted") new Notification(msg);
+        else if (Notification.permission !== "denied") {
+          const perm = await Notification.requestPermission();
+          if (perm === "granted") new Notification(msg);
+        }
+      }
+    } catch {}
+  }
+
+  function handleComplete() {
+    beep();
+    const endedLabel = mode === "focus" ? "Focus done — break time!" : "Break finished — back to focus!";
+    notify(endedLabel);
+
+    if (mode === "focus") {
+      const nextIsLong = ( (completedFocus + 1) % roundsForLong === 0 );
+      setCompletedFocus((n) => n + 1);
+      const nextMode = nextIsLong ? "long" : "short";
+      setMode(nextMode);
+      const nextSecs = (nextIsLong ? longMin : shortMin) * 60;
+      setSecondsLeft(nextSecs);
+      if (autoStart) {
+        const ts = Date.now() + nextSecs * 1000;
+        setTargetTs(ts);
+        setIsRunning(true);
+      }
+    } else {
+      // break finished -> go to focus
+      setMode("focus");
+      const nextSecs = focusMin * 60;
+      setSecondsLeft(nextSecs);
+      if (autoStart) {
+        const ts = Date.now() + nextSecs * 1000;
+        setTargetTs(ts);
+        setIsRunning(true);
+      }
+    }
+  }
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target && e.target.tagName) || "";
+      if (["INPUT","TEXTAREA"].includes(tag)) return;
+      if (e.code === "Space") { e.preventDefault(); isRunning ? pause() : start(); }
+      if (e.key.toLowerCase() === "r") { e.preventDefault(); reset(); }
+      if (e.key.toLowerCase() === "n") { e.preventDefault(); handleComplete(); }
+      if (e.key === "1") switchMode("focus");
+      if (e.key === "2") switchMode("short");
+      if (e.key === "3") switchMode("long");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isRunning, targetTs, mode, focusMin, shortMin, longMin, roundsForLong, autoStart, completedFocus]);
+
+  const m = Math.floor(secondsLeft / 60), s = secondsLeft % 60;
+  const pct = totalSeconds === 0 ? 0 : (1 - secondsLeft / totalSeconds);
+
+  // Progress ring params
+  const R = 100, STROKE = 10;
+  const C = 2 * Math.PI * R;
+  const dash = C * pct;
+
+  const sessionLabel = mode === "focus" ? "Focus" : mode === "short" ? "Break" : "Long Break";
+
+  const cycleDots = Array.from({ length: roundsForLong }, (_, i) => i < (completedFocus % roundsForLong));
+
+  return (
+    <div className="min-h-screen w-full bg-neutral-950 text-neutral-100 flex items-center justify-center p-6">
+      <div className="w-full max-w-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-2xl font-semibold tracking-tight">Minimalist Pomodoro</h1>
+          <button
+            className="text-sm px-3 py-1 rounded-full border border-neutral-800 hover:bg-neutral-900"
+            onClick={() => setShowSettings((v) => !v)}
+            aria-label="Toggle settings"
+          >
+            {showSettings ? "Hide Settings" : "Settings"}
+          </button>
+        </div>
+
+        {/* Mode Switch */}
+        <div className="grid grid-cols-3 gap-2 mb-6">
+          {(["focus","short","long"]).map((m) => (
+            <button
+              key={m}
+              onClick={() => switchMode(m)}
+              className={
+                "px-3 py-2 rounded-xl border text-sm transition " +
+                (mode === m
+                  ? "bg-neutral-100 text-neutral-900 border-neutral-100"
+                  : "border-neutral-800 hover:bg-neutral-900")
               }
-            }
-          } catch {}
-        };
+            >
+              {m === "focus" ? "Focus" : m === "short" ? "Short" : "Long"}
+            </button>
+          ))}
+        </div>
 
-        const handleComplete = () => {
-          beep();
-          const endedLabel = mode === "focus" ? "Focus done — break time!" : "Break finished — back to focus!";
-          notify(endedLabel);
-
-          if (mode === "focus") {
-            const nextIsLong = ((completedFocus + 1) % roundsForLong === 0);
-            setCompletedFocus((n) => n + 1);
-            const nextMode = nextIsLong ? "long" : "short";
-            setMode(nextMode);
-            const nextSecs = (nextIsLong ? longMin : shortMin) * 60;
-            setSecondsLeft(nextSecs);
-            if (autoStart) { setTargetTs(Date.now() + nextSecs * 1000); setIsRunning(true); }
-          } else {
-            setMode("focus");
-            const nextSecs = focusMin * 60;
-            setSecondsLeft(nextSecs);
-            if (autoStart) { setTargetTs(Date.now() + nextSecs * 1000); setIsRunning(true); }
-          }
-        };
-
-        useEffect(() => {
-          const onKey = (e) => {
-            const tag = (e.target && e.target.tagName) || "";
-            if (["INPUT","TEXTAREA"].includes(tag)) return;
-            if (e.code === "Space") { e.preventDefault(); isRunning ? pause() : start(); }
-            if (e.key.toLowerCase() === "r") { e.preventDefault(); reset(); }
-            if (e.key.toLowerCase() === "n") { e.preventDefault(); handleComplete(); }
-            if (e.key === "1") switchMode("focus");
-            if (e.key === "2") switchMode("short");
-            if (e.key === "3") switchMode("long");
-          };
-          window.addEventListener("keydown", onKey);
-          return () => window.removeEventListener("keydown", onKey);
-        }, [isRunning, targetTs, mode, focusMin, shortMin, longMin, roundsForLong, autoStart, completedFocus]);
-
-        const m = Math.floor(secondsLeft / 60), s = secondsLeft % 60;
-        const totalSecondsNow = (mode === "focus" ? focusMin : mode === "short" ? shortMin : longMin) * 60;
-        const pct = totalSecondsNow === 0 ? 0 : (1 - secondsLeft / totalSecondsNow);
-        const R = 100, STROKE = 10, C = 2 * Math.PI * R, dash = C * pct;
-        const sessionLabel = mode === "focus" ? "Focus" : mode === "short" ? "Break" : "Long Break";
-        const cycleDots = Array.from({ length: roundsForLong }, (_, i) => i < (completedFocus % roundsForLong));
-
-        return (
-          <div className="w-full flex items-center justify-center p-6">
-            <div className="w-full max-w-xl">
-              <div className="flex items-center justify-between mb-6">
-                <h1 className="text-2xl font-semibold tracking-tight">Minimalist Pomodoro</h1>
-                <button className="text-sm px-3 py-1 rounded-full border border-neutral-800 hover:bg-neutral-900" onClick={() => setShowSettings(v => !v)}>
-                  {showSettings ? "Hide Settings" : "Settings"}
-                </button>
+        {/* Timer Card */}
+        <div className="bg-neutral-900 rounded-3xl p-6 shadow-xl border border-neutral-800 mb-6">
+          <div className="flex items-center justify-center">
+            <div className="relative" style={{ width: 260, height: 260 }}>
+              <svg width="260" height="260" viewBox="0 0 260 260" className="block">
+                <circle cx="130" cy="130" r={R} stroke="#27272a" strokeWidth={STROKE} fill="none" />
+                <circle
+                  cx="130" cy="130" r={R}
+                  stroke="currentColor"
+                  strokeWidth={STROKE}
+                  strokeLinecap="round"
+                  fill="none"
+                  strokeDasharray={`${dash} ${C}`}
+                  transform="rotate(-90 130 130)"
+                  className="text-neutral-200"
+                />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center select-none">
+                <div className="text-xs uppercase tracking-widest text-neutral-400 mb-1">{sessionLabel}</div>
+                <div className="font-mono text-6xl tabular-nums leading-none">{pad(m)}:{pad(s)}</div>
               </div>
-
-              <div className="grid grid-cols-3 gap-2 mb-6">
-                {["focus","short","long"].map((m) => (
-                  <button key={m} onClick={() => switchMode(m)} className={"px-3 py-2 rounded-xl border text-sm transition " + (mode === m ? "bg-neutral-100 text-neutral-900 border-neutral-100" : "border-neutral-800 hover:bg-neutral-900")}>
-                    {m === "focus" ? "Focus" : m === "short" ? "Short" : "Long"}
-                  </button>
-                ))}
-              </div>
-
-              <div className="bg-neutral-900 rounded-3xl p-6 shadow-xl border border-neutral-800 mb-6">
-                <div className="flex items-center justify-center">
-                  <div className="relative" style={{ width: 260, height: 260 }}>
-                    <svg width="260" height="260" viewBox="0 0 260 260" className="block">
-                      <circle cx="130" cy="130" r={100} stroke="#27272a" strokeWidth={10} fill="none" />
-                      <circle cx="130" cy="130" r={100} stroke="currentColor" strokeWidth={10} strokeLinecap="round" fill="none" strokeDasharray={`${dash} ${C}`} transform="rotate(-90 130 130)" className="text-neutral-200" />
-                    </svg>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center select-none">
-                      <div className="text-xs uppercase tracking-widest text-neutral-400 mb-1">{sessionLabel}</div>
-                      <div className="font-mono text-6xl tabular-nums leading-none">{pad(m)}:{pad(s)}</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-center gap-3 mt-6">
-                  {!isRunning ? (
-                    <button onClick={start} className="px-6 py-2 rounded-xl bg-white text-neutral-900 font-medium hover:opacity-90">Start</button>
-                  ) : (
-                    <button onClick={pause} className="px-6 py-2 rounded-xl bg-white text-neutral-900 font-medium hover:opacity-90">Pause</button>
-                  )}
-                  <button onClick={() => reset()} className="px-4 py-2 rounded-xl border border-neutral-700 hover:bg-neutral-800">Reset</button>
-                  <button onClick={handleComplete} className="px-4 py-2 rounded-xl border border-neutral-700 hover:bg-neutral-800">Skip</button>
-                </div>
-
-                <div className="flex items-center justify-center gap-1 mt-4" aria-label="Cycle progress">
-                  {cycleDots.map((filled, i) => (
-                    <div key={i} className={"w-2.5 h-2.5 rounded-full " + (filled ? "bg-neutral-200" : "bg-neutral-700")} />
-                  ))}
-                </div>
-              </div>
-
-              {showSettings && (
-                <div className="bg-neutral-900 rounded-3xl p-5 border border-neutral-800">
-                  <div className="grid grid-cols-2 gap-4">
-                    <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
-                      <span>Focus (min)</span>
-                      <input type="number" min={1} max={180} value={focusMin} onChange={(e) => setFocusMin(clamp(parseInt(e.target.value||"0",10)||0,1,180))} className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right" />
-                    </label>
-                    <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
-                      <span>Short Break (min)</span>
-                      <input type="number" min={1} max={60} value={shortMin} onChange={(e) => setShortMin(clamp(parseInt(e.target.value||"0",10)||0,1,60))} className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right" />
-                    </label>
-                    <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
-                      <span>Long Break (min)</span>
-                      <input type="number" min={5} max={120} value={longMin} onChange={(e) => setLongMin(clamp(parseInt(e.target.value||"0",10)||0,5,120))} className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right" />
-                    </label>
-                    <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
-                      <span>Rounds before Long</span>
-                      <input type="number" min={2} max={8} value={roundsForLong} onChange={(e) => setRoundsForLong(clamp(parseInt(e.target.value||"0",10)||0,2,8))} className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right" />
-                    </label>
-                    <label className="col-span-2 text-sm text-neutral-300 flex items-center justify-between gap-3">
-                      <span>Auto-start next session</span>
-                      <input type="checkbox" checked={!!autoStart} onChange={(e) => setAutoStart(e.target.checked)} className="w-5 h-5 accent-white" />
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              <p className="text-xs text-neutral-500 mt-4 select-none">Shortcuts: Space = Start/Pause · R = Reset · N = Skip · 1/2/3 = Focus/Short/Long</p>
             </div>
           </div>
-        );
-      }
 
-      const root = ReactDOM.createRoot(document.getElementById("root"));
-      root.render(<PomodoroApp />);
-    </script>
-  </body>
-</html>
+          <div className="flex items-center justify-center gap-3 mt-6">
+            {!isRunning ? (
+              <button
+                onClick={start}
+                className="px-6 py-2 rounded-xl bg-white text-neutral-900 font-medium hover:opacity-90"
+                aria-label="Start"
+              >Start</button>
+            ) : (
+              <button
+                onClick={pause}
+                className="px-6 py-2 rounded-xl bg-white text-neutral-900 font-medium hover:opacity-90"
+                aria-label="Pause"
+              >Pause</button>
+            )}
+            <button
+              onClick={() => reset()}
+              className="px-4 py-2 rounded-xl border border-neutral-700 hover:bg-neutral-800"
+              aria-label="Reset"
+            >Reset</button>
+            <button
+              onClick={handleComplete}
+              className="px-4 py-2 rounded-xl border border-neutral-700 hover:bg-neutral-800"
+              aria-label="Skip"
+            >Skip</button>
+          </div>
+
+          {/* Cycle dots */}
+          <div className="flex items-center justify-center gap-1 mt-4" aria-label="Cycle progress">
+            {cycleDots.map((filled, i) => (
+              <div key={i} className={
+                "w-2.5 h-2.5 rounded-full " + (filled ? "bg-neutral-200" : "bg-neutral-700")
+              } />
+            ))}
+          </div>
+        </div>
+
+        {/* Settings */}
+        {showSettings && (
+          <div className="bg-neutral-900 rounded-3xl p-5 border border-neutral-800">
+            <div className="grid grid-cols-2 gap-4">
+              <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
+                <span>Focus (min)</span>
+                <input
+                  type="number" min={1} max={180}
+                  value={focusMin}
+                  onChange={(e) => setFocusMin(clamp(parseInt(e.target.value||"0",10)||0,1,180))}
+                  className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right"
+                />
+              </label>
+              <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
+                <span>Short Break (min)</span>
+                <input
+                  type="number" min={1} max={60}
+                  value={shortMin}
+                  onChange={(e) => setShortMin(clamp(parseInt(e.target.value||"0",10)||0,1,60))}
+                  className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right"
+                />
+              </label>
+              <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
+                <span>Long Break (min)</span>
+                <input
+                  type="number" min={5} max={120}
+                  value={longMin}
+                  onChange={(e) => setLongMin(clamp(parseInt(e.target.value||"0",10)||0,5,120))}
+                  className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right"
+                />
+              </label>
+              <label className="text-sm text-neutral-300 flex items-center justify-between gap-3">
+                <span>Rounds before Long</span>
+                <input
+                  type="number" min={2} max={8}
+                  value={roundsForLong}
+                  onChange={(e) => setRoundsForLong(clamp(parseInt(e.target.value||"0",10)||0,2,8))}
+                  className="w-24 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1 text-right"
+                />
+              </label>
+              <label className="col-span-2 text-sm text-neutral-300 flex items-center justify-between gap-3">
+                <span>Auto-start next session</span>
+                <input
+                  type="checkbox"
+                  checked={!!autoStart}
+                  onChange={(e) => setAutoStart(e.target.checked)}
+                  className="w-5 h-5 accent-white"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+
+        <p className="text-xs text-neutral-500 mt-4 select-none">
+          Shortcuts: Space = Start/Pause · R = Reset · N = Skip · 1/2/3 = Focus/Short/Long
+        </p>
+      </div>
+    </div>
+  );
+}
